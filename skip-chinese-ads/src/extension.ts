@@ -25,6 +25,33 @@ import {
   type SkipControl,
 } from "./storage";
 
+/**
+ * Compatibility shims: older runtimes may lack AbortSignal.any / AbortSignal.timeout.
+ * When missing, fall back to a manual AbortController so we never call undefined.
+ */
+function anySignal(signals: readonly AbortSignal[]): AbortSignal {
+  const native = (AbortSignal as unknown as { any?: (list: AbortSignal[]) => AbortSignal }).any;
+  if (typeof native === "function") return native.call(AbortSignal, [...signals]);
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort();
+      break;
+    }
+    signal.addEventListener("abort", abort, { once: true });
+  }
+  return controller.signal;
+}
+
+function timeoutSignal(ms: number): AbortSignal {
+  const native = (AbortSignal as unknown as { timeout?: (ms: number) => AbortSignal }).timeout;
+  if (typeof native === "function") return native.call(AbortSignal, ms);
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), Math.max(0, ms));
+  return controller.signal;
+}
+
 const rewarded: Rule = { within: { class: /Reward|Incentive/i } };
 const ownApps = /^(?:com\.apple\.|io\.nekohasekai\.swipt(?:\.|$))/;
 // These apps warn about screen recording while the device streams its screen.
@@ -264,9 +291,9 @@ const skipOnScreen = async (round: Round) => {
   const regions = round.learned.map((learned) =>
     around(learned.frame, round.screenSize),
   );
-  const window = AbortSignal.any([
+  const window = anySignal([
     round.skipping,
-    AbortSignal.timeout(Math.max(adTimeLeft(round), 0)),
+    timeoutSignal(Math.max(adTimeLeft(round), 0)),
   ]);
   let stream: ScreenStream;
   try {
@@ -512,7 +539,7 @@ const runRound = async (
     })),
     learned: await readControls(app),
     signal,
-    skipping: AbortSignal.any([signal, skipped.signal]),
+    skipping: anySignal([signal, skipped.signal]),
     skipped: () => skipped.abort(),
     log: (message) =>
       console.debug(`${app} pid ${pid} +${Date.now() - started}ms: ${message}`),
@@ -563,7 +590,12 @@ const runRound = async (
 
 export default defineExtension({
   async run({ signal }) {
-    const { screen: screenSize } = await device.info({ signal });
+    const info = await device.info({ signal });
+    const screenSize = info?.screen;
+    if (screenSize === undefined) {
+      console.error("device.info() returned no screen; cannot continue", info);
+      return;
+    }
     const rounds = new Map<
       string,
       {
@@ -573,6 +605,10 @@ export default defineExtension({
       }
     >();
     for await (const event of device.applicationEvents({ signal })) {
+      if (event === undefined || event === null || typeof event.bundleId !== "string") {
+        console.error("applicationEvents yielded a malformed event", event);
+        continue;
+      }
       if (ownApps.test(event.bundleId)) {
         continue;
       }
@@ -617,7 +653,7 @@ export default defineExtension({
         settings,
         screenSize,
         onScreen,
-        AbortSignal.any([signal, controller.signal]),
+        anySignal([signal, controller.signal]),
       ).catch((error: Error) => {
         if (error.name !== "AbortError") {
           console.error(event.bundleId, error);
@@ -637,10 +673,12 @@ export default defineExtension({
             bundleId,
             name,
             version,
-            icon: (await device.applicationIcon(bundleId, { signal })).uri,
+            icon: ((await device.applicationIcon(bundleId, { signal }))?.uri ?? ""),
           })),
         );
-        apps.sort((first, second) => first.name.localeCompare(second.name));
+        apps.sort((first, second) =>
+      (first.name ?? first.bundleId).localeCompare(second.name ?? second.bundleId),
+    );
         return apps;
       },
     }),
@@ -657,7 +695,7 @@ export default defineExtension({
               icon:
                 app === undefined
                   ? undefined
-                  : (await device.applicationIcon(bundleId, { signal })).uri,
+                  : ((await device.applicationIcon(bundleId, { signal }))?.uri ?? ""),
             };
           }),
         );
