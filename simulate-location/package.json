@@ -62,7 +62,9 @@
       "symbol": "location.fill"
     },
     "app": "./src/App.tsx",
-    "extension": "./src/extension.ts"
+    "extension": "./src/extension.ts",
+    "version": "0.2.0",
+    "versionCode": 12
   },
   "scripts": {
     "build": "swipt project build",
